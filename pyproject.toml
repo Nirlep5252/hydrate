@@ -1,0 +1,13 @@
+[project]
+name = "hydrate"
+version = "0.1.0"
+description = "CLI tool to remind you to stay hydrated with sound alerts"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "schedule>=1.2.2",
+    "typer>=0.20.0",
+]
+
+[project.scripts]
+hydrate = "main:app"
