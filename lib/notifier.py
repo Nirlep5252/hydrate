@@ -34,7 +34,7 @@ class SoundPlayer:
 
     def play_wav(self, sound_file: str, volume: float = 1.0) -> None:
         """
-        Play a WAV file using Windows MediaPlayer with volume control.
+        Play a WAV file using Windows MediaPlayer with volume control (non-blocking).
 
         Args:
             sound_file: Name of sound file in sounds_dir (e.g., 'simple.wav')
@@ -42,7 +42,6 @@ class SoundPlayer:
 
         Raises:
             FileNotFoundError: If sound file doesn't exist
-            subprocess.CalledProcessError: If playback fails
             ValueError: If volume is out of range
         """
         if not 0.0 <= volume <= 1.0:
@@ -64,8 +63,11 @@ class SoundPlayer:
         Start-Sleep -Seconds 2
         """
 
-        subprocess.run(
-            ["powershell.exe", "-c", powershell_cmd], capture_output=True, check=True
+        subprocess.Popen(
+            ["powershell.exe", "-c", powershell_cmd],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL
         )
 
     def list_sounds(self) -> list[str]:
