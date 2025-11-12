@@ -7,7 +7,14 @@ from textual.widgets import Static
 from textual.containers import Center, Middle
 from textual.reactive import reactive
 
-from lib.utils import console, get_player, DEFAULT_SOUND, DEFAULT_VOLUME
+from lib.utils import (
+    console,
+    get_player,
+    get_notifier,
+    DEFAULT_SOUND,
+    DEFAULT_VOLUME,
+    DEFAULT_NOTIFICATIONS_ENABLED,
+)
 
 
 class HydrationApp(App):
@@ -53,12 +60,22 @@ class HydrationApp(App):
     total_seconds = reactive(60)
     reminder_count = reactive(0)
 
-    def __init__(self, interval: int, sound: str, volume: float, player):
+    def __init__(
+        self,
+        interval: int,
+        sound: str,
+        volume: float,
+        player,
+        notifier=None,
+        enable_notifications: bool = True,
+    ):
         super().__init__()
         self.interval = interval
         self.sound = sound
         self.volume = volume
         self.player = player
+        self.notifier = notifier
+        self.enable_notifications = enable_notifications
         self.total_seconds = interval * 60
         self.start_time = None
 
@@ -67,8 +84,10 @@ class HydrationApp(App):
         yield Static("💧 HYDRATION COUNTDOWN", id="title")
         yield Static("", id="progress-bar")
         yield Static("", id="timer")
+
+        notif_status = "ON" if self.enable_notifications and self.notifier and self.notifier.is_available else "OFF"
         yield Static(
-            f"Interval: {self.interval}min | Sound: {self.sound} | Volume: {int(self.volume * 100)}%\nPress Ctrl+C or 'q' to quit",
+            f"Interval: {self.interval}min | Sound: {self.sound} | Volume: {int(self.volume * 100)}% | Notifications: {notif_status}\nPress Ctrl+C or 'q' to quit",
             id="info"
         )
 
@@ -77,15 +96,27 @@ class HydrationApp(App):
         self.start_time = time.time()
         self.set_interval(1.0, self.update_countdown)
 
-        # Play first reminder
-        try:
-            self.player.play_wav(self.sound, self.volume)
-            self.reminder_count += 1
-        except Exception:
-            pass
+        self._trigger_reminder()
 
         # Initial display
         self.update_display(0)
+
+    def _trigger_reminder(self) -> None:
+        """Trigger sound and notification reminders."""
+        self.reminder_count += 1
+
+        # Play sound
+        try:
+            self.player.play_wav(self.sound, self.volume)
+        except Exception:
+            pass
+
+        # Send notification
+        if self.enable_notifications and self.notifier and self.notifier.is_available:
+            try:
+                self.notifier.send_hydration_reminder(self.reminder_count)
+            except Exception:
+                pass
 
     def update_countdown(self) -> None:
         """Update countdown timer."""
@@ -96,12 +127,7 @@ class HydrationApp(App):
         elapsed = current_time - self.start_time
 
         if elapsed >= self.total_seconds:
-            # Play reminder
-            try:
-                self.player.play_wav(self.sound, self.volume)
-                self.reminder_count += 1
-            except Exception:
-                pass
+            self._trigger_reminder()
 
             # Reset timer
             self.start_time = current_time
@@ -165,11 +191,17 @@ def start(
         min=0.0,
         max=1.0,
     ),
+    notifications: bool = typer.Option(
+        DEFAULT_NOTIFICATIONS_ENABLED,
+        "--notifications/--no-notifications",
+        "-n/-N",
+        help="Enable Windows toast notifications",
+    ),
 ):
     """
     Start hydration reminder daemon.
 
-    Plays a sound at regular intervals to remind you to drink water.
+    Plays a sound and shows notifications at regular intervals to remind you to drink water.
     Press Ctrl+C or 'q' to stop.
     """
     try:
@@ -185,14 +217,27 @@ def start(
             console.print(f"  • {s}")
         raise typer.Exit(1)
 
+    notifier = get_notifier() if notifications else None
+
     console.print(
         f"[green]Starting hydration reminders every {interval} minute{'s' if interval != 1 else ''}[/green]"
     )
     console.print(f"[cyan]Sound:[/cyan] {sound}")
     console.print(f"[cyan]Volume:[/cyan] {int(volume * 100)}%")
+
+    if notifications:
+        if notifier and notifier.is_available:
+            console.print("[cyan]Notifications:[/cyan] Enabled ✓")
+        else:
+            console.print(
+                "[yellow]Notifications:[/yellow] Requested but unavailable (install windows-toasts)"
+            )
+    else:
+        console.print("[cyan]Notifications:[/cyan] Disabled")
+
     console.print("[yellow]Press Ctrl+C or 'q' to stop[/yellow]\n")
 
-    app = HydrationApp(interval, sound, volume, player)
+    app = HydrationApp(interval, sound, volume, player, notifier, notifications)
 
     try:
         app.run()
