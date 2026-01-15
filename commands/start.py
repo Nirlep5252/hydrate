@@ -1,5 +1,7 @@
 """Start command - Run hydration reminder daemon."""
 
+import os
+import signal
 import time
 import typer
 from textual.app import App, ComposeResult
@@ -14,6 +16,14 @@ from lib.utils import (
     DEFAULT_SOUND,
     DEFAULT_VOLUME,
     DEFAULT_NOTIFICATIONS_ENABLED,
+)
+import sys
+from lib.state import (
+    write_state,
+    clear_state,
+    acquire_lock_and_check,
+    write_state_locked,
+    release_lock,
 )
 
 
@@ -98,6 +108,9 @@ class HydrationApp(App):
 
         self._trigger_reminder()
 
+        # Write initial state
+        write_state(self.start_time, self.total_seconds, self.reminder_count)
+
         # Initial display
         self.update_display(0)
 
@@ -132,6 +145,9 @@ class HydrationApp(App):
             # Reset timer
             self.start_time = current_time
             elapsed = 0
+
+        # Update state file
+        write_state(self.start_time, self.total_seconds, self.reminder_count)
 
         self.update_display(elapsed)
 
@@ -169,6 +185,61 @@ class HydrationApp(App):
             self.exit()
 
 
+def _run_daemon(
+    interval: int,
+    sound: str,
+    volume: float,
+    player,
+    notifier,
+    enable_notifications: bool,
+) -> None:
+    """Run hydration reminders in daemon mode (no TUI)."""
+    interval_seconds = interval * 60
+    start_time = time.time()
+    reminder_count = 0
+    running = True
+
+    def handle_signal(signum, frame):
+        nonlocal running
+        running = False
+
+    signal.signal(signal.SIGTERM, handle_signal)
+    signal.signal(signal.SIGINT, handle_signal)
+
+    def trigger_reminder():
+        nonlocal reminder_count
+        reminder_count += 1
+
+        try:
+            player.play_wav(sound, volume)
+        except Exception:
+            pass
+
+        if enable_notifications and notifier and notifier.is_available:
+            try:
+                notifier.send_hydration_reminder(reminder_count)
+            except Exception:
+                pass
+
+    # Initial reminder
+    trigger_reminder()
+    write_state(start_time, interval_seconds, reminder_count)
+
+    while running:
+        time.sleep(1)
+
+        current_time = time.time()
+        elapsed = current_time - start_time
+
+        if elapsed >= interval_seconds:
+            trigger_reminder()
+            start_time = current_time
+
+        write_state(start_time, interval_seconds, reminder_count)
+
+    clear_state()
+
+
 def start(
     interval: int = typer.Option(
         60,
@@ -197,6 +268,12 @@ def start(
         "-n/-N",
         help="Enable desktop notifications",
     ),
+    daemon: bool = typer.Option(
+        False,
+        "--daemon",
+        "-d",
+        help="Run in background without TUI",
+    ),
 ):
     """
     Start hydration reminder daemon.
@@ -204,13 +281,23 @@ def start(
     Plays a sound and shows notifications at regular intervals to remind you to drink water.
     Press Ctrl+C or 'q' to stop.
     """
+    # Atomically check if already running (with lock held)
+    already_running, existing_pid, lock_fd = acquire_lock_and_check()
+    if already_running:
+        release_lock(lock_fd)
+        console.print(f"[yellow]Hydrate is already running (PID: {existing_pid})[/yellow]")
+        console.print("Use [cyan]hydrate stop[/cyan] to stop it first.")
+        raise typer.Exit(1)
+
     try:
         player = get_player()
     except FileNotFoundError as e:
+        release_lock(lock_fd)
         console.print(f"[red]Error:[/red] {e}")
         raise typer.Exit(1)
 
     if not player.validate_sound(sound):
+        release_lock(lock_fd)
         console.print(f"[red]Error:[/red] Sound file '{sound}' not found!")
         console.print("\n[cyan]Available sounds:[/cyan]")
         for s in player.list_sounds():
@@ -219,6 +306,42 @@ def start(
 
     notifier = get_notifier() if notifications else None
 
+    if daemon:
+        # Double-fork to fully daemonize and prevent zombies
+        first_pid = os.fork()
+        if first_pid > 0:
+            # Original parent: wait for first child to exit, then release lock
+            os.waitpid(first_pid, 0)
+            release_lock(lock_fd)
+            return
+
+        # First child: become session leader
+        os.setsid()
+
+        # Second fork: prevent daemon from acquiring a controlling terminal
+        second_pid = os.fork()
+        if second_pid > 0:
+            # First child: write state with daemon PID before exiting
+            interval_seconds = interval * 60
+            write_state_locked(lock_fd, time.time(), interval_seconds, 0, second_pid)
+            release_lock(lock_fd)
+            console.print(
+                f"[green]Started hydration daemon (PID: {second_pid})[/green]"
+            )
+            console.print(f"[cyan]Interval:[/cyan] {interval} minute{'s' if interval != 1 else ''}")
+            console.print(f"[cyan]Sound:[/cyan] {sound}")
+            console.print("Use [cyan]hydrate stop[/cyan] to stop.")
+            sys.exit(0)
+
+        # Second child (daemon): close inherited lock and run
+        release_lock(lock_fd)
+        _run_daemon(interval, sound, volume, player, notifier, notifications)
+        sys.exit(0)
+
+    # TUI mode - release lock since we'll manage state ourselves
+    release_lock(lock_fd)
+
+    # TUI mode
     console.print(
         f"[green]Starting hydration reminders every {interval} minute{'s' if interval != 1 else ''}[/green]"
     )
@@ -244,5 +367,6 @@ def start(
     except KeyboardInterrupt:
         pass
     finally:
+        clear_state()
         console.print("\n[yellow]Stopping reminders. Stay hydrated! 💧[/yellow]")
         console.print(f"[cyan]Total reminders played:[/cyan] {app.reminder_count}")
