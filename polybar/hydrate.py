@@ -2,20 +2,17 @@
 """Polybar module script for hydrate countdown display."""
 
 import json
-import os
+import sys
 import time
 from pathlib import Path
 
+# Add project root to path for imports
+PROJECT_ROOT = Path(__file__).parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
+
+from lib.state import is_process_running
+
 STATE_FILE = Path.home() / ".hydrate" / "state.json"
-
-
-def is_process_running(pid: int) -> bool:
-    """Check if a process with given PID is running."""
-    try:
-        os.kill(pid, 0)
-        return True
-    except (OSError, ProcessLookupError):
-        return False
 
 
 def format_time(seconds: int) -> str:
@@ -32,7 +29,8 @@ def main():
         return
 
     try:
-        state = json.loads(STATE_FILE.read_text())
+        with open(STATE_FILE, "r") as f:
+            state = json.load(f)
     except (json.JSONDecodeError, IOError):
         print("\U0001f4a7 h2o")
         return

@@ -17,7 +17,14 @@ from lib.utils import (
     DEFAULT_VOLUME,
     DEFAULT_NOTIFICATIONS_ENABLED,
 )
-from lib.state import write_state, clear_state, is_running
+import sys
+from lib.state import (
+    write_state,
+    clear_state,
+    acquire_lock_and_check,
+    write_state_locked,
+    release_lock,
+)
 
 
 class HydrationApp(App):
@@ -274,20 +281,23 @@ def start(
     Plays a sound and shows notifications at regular intervals to remind you to drink water.
     Press Ctrl+C or 'q' to stop.
     """
-    # Check if already running
-    running, pid = is_running()
-    if running:
-        console.print(f"[yellow]Hydrate is already running (PID: {pid})[/yellow]")
+    # Atomically check if already running (with lock held)
+    already_running, existing_pid, lock_fd = acquire_lock_and_check()
+    if already_running:
+        release_lock(lock_fd)
+        console.print(f"[yellow]Hydrate is already running (PID: {existing_pid})[/yellow]")
         console.print("Use [cyan]hydrate stop[/cyan] to stop it first.")
         raise typer.Exit(1)
 
     try:
         player = get_player()
     except FileNotFoundError as e:
+        release_lock(lock_fd)
         console.print(f"[red]Error:[/red] {e}")
         raise typer.Exit(1)
 
     if not player.validate_sound(sound):
+        release_lock(lock_fd)
         console.print(f"[red]Error:[/red] Sound file '{sound}' not found!")
         console.print("\n[cyan]Available sounds:[/cyan]")
         for s in player.list_sounds():
@@ -297,22 +307,39 @@ def start(
     notifier = get_notifier() if notifications else None
 
     if daemon:
-        # Fork to background
-        pid = os.fork()
-        if pid > 0:
-            # Parent process
+        # Double-fork to fully daemonize and prevent zombies
+        first_pid = os.fork()
+        if first_pid > 0:
+            # Original parent: wait for first child to exit, then release lock
+            os.waitpid(first_pid, 0)
+            release_lock(lock_fd)
+            return
+
+        # First child: become session leader
+        os.setsid()
+
+        # Second fork: prevent daemon from acquiring a controlling terminal
+        second_pid = os.fork()
+        if second_pid > 0:
+            # First child: write state with daemon PID before exiting
+            interval_seconds = interval * 60
+            write_state_locked(lock_fd, time.time(), interval_seconds, 0, second_pid)
+            release_lock(lock_fd)
             console.print(
-                f"[green]Started hydration daemon (PID: {pid})[/green]"
+                f"[green]Started hydration daemon (PID: {second_pid})[/green]"
             )
             console.print(f"[cyan]Interval:[/cyan] {interval} minute{'s' if interval != 1 else ''}")
             console.print(f"[cyan]Sound:[/cyan] {sound}")
             console.print("Use [cyan]hydrate stop[/cyan] to stop.")
-            return
+            sys.exit(0)
 
-        # Child process - detach from terminal
-        os.setsid()
+        # Second child (daemon): close inherited lock and run
+        release_lock(lock_fd)
         _run_daemon(interval, sound, volume, player, notifier, notifications)
-        return
+        sys.exit(0)
+
+    # TUI mode - release lock since we'll manage state ourselves
+    release_lock(lock_fd)
 
     # TUI mode
     console.print(
