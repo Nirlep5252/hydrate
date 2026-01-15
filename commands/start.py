@@ -1,5 +1,7 @@
 """Start command - Run hydration reminder daemon."""
 
+import os
+import signal
 import time
 import typer
 from textual.app import App, ComposeResult
@@ -15,6 +17,7 @@ from lib.utils import (
     DEFAULT_VOLUME,
     DEFAULT_NOTIFICATIONS_ENABLED,
 )
+from lib.state import write_state, clear_state, is_running
 
 
 class HydrationApp(App):
@@ -98,6 +101,9 @@ class HydrationApp(App):
 
         self._trigger_reminder()
 
+        # Write initial state
+        write_state(self.start_time, self.total_seconds, self.reminder_count)
+
         # Initial display
         self.update_display(0)
 
@@ -132,6 +138,9 @@ class HydrationApp(App):
             # Reset timer
             self.start_time = current_time
             elapsed = 0
+
+        # Update state file
+        write_state(self.start_time, self.total_seconds, self.reminder_count)
 
         self.update_display(elapsed)
 
@@ -169,6 +178,61 @@ class HydrationApp(App):
             self.exit()
 
 
+def _run_daemon(
+    interval: int,
+    sound: str,
+    volume: float,
+    player,
+    notifier,
+    enable_notifications: bool,
+) -> None:
+    """Run hydration reminders in daemon mode (no TUI)."""
+    interval_seconds = interval * 60
+    start_time = time.time()
+    reminder_count = 0
+    running = True
+
+    def handle_signal(signum, frame):
+        nonlocal running
+        running = False
+
+    signal.signal(signal.SIGTERM, handle_signal)
+    signal.signal(signal.SIGINT, handle_signal)
+
+    def trigger_reminder():
+        nonlocal reminder_count
+        reminder_count += 1
+
+        try:
+            player.play_wav(sound, volume)
+        except Exception:
+            pass
+
+        if enable_notifications and notifier and notifier.is_available:
+            try:
+                notifier.send_hydration_reminder(reminder_count)
+            except Exception:
+                pass
+
+    # Initial reminder
+    trigger_reminder()
+    write_state(start_time, interval_seconds, reminder_count)
+
+    while running:
+        time.sleep(1)
+
+        current_time = time.time()
+        elapsed = current_time - start_time
+
+        if elapsed >= interval_seconds:
+            trigger_reminder()
+            start_time = current_time
+
+        write_state(start_time, interval_seconds, reminder_count)
+
+    clear_state()
+
+
 def start(
     interval: int = typer.Option(
         60,
@@ -197,6 +261,12 @@ def start(
         "-n/-N",
         help="Enable desktop notifications",
     ),
+    daemon: bool = typer.Option(
+        False,
+        "--daemon",
+        "-d",
+        help="Run in background without TUI",
+    ),
 ):
     """
     Start hydration reminder daemon.
@@ -204,6 +274,13 @@ def start(
     Plays a sound and shows notifications at regular intervals to remind you to drink water.
     Press Ctrl+C or 'q' to stop.
     """
+    # Check if already running
+    running, pid = is_running()
+    if running:
+        console.print(f"[yellow]Hydrate is already running (PID: {pid})[/yellow]")
+        console.print("Use [cyan]hydrate stop[/cyan] to stop it first.")
+        raise typer.Exit(1)
+
     try:
         player = get_player()
     except FileNotFoundError as e:
@@ -219,6 +296,25 @@ def start(
 
     notifier = get_notifier() if notifications else None
 
+    if daemon:
+        # Fork to background
+        pid = os.fork()
+        if pid > 0:
+            # Parent process
+            console.print(
+                f"[green]Started hydration daemon (PID: {pid})[/green]"
+            )
+            console.print(f"[cyan]Interval:[/cyan] {interval} minute{'s' if interval != 1 else ''}")
+            console.print(f"[cyan]Sound:[/cyan] {sound}")
+            console.print("Use [cyan]hydrate stop[/cyan] to stop.")
+            return
+
+        # Child process - detach from terminal
+        os.setsid()
+        _run_daemon(interval, sound, volume, player, notifier, notifications)
+        return
+
+    # TUI mode
     console.print(
         f"[green]Starting hydration reminders every {interval} minute{'s' if interval != 1 else ''}[/green]"
     )
@@ -244,5 +340,6 @@ def start(
     except KeyboardInterrupt:
         pass
     finally:
+        clear_state()
         console.print("\n[yellow]Stopping reminders. Stay hydrated! 💧[/yellow]")
         console.print(f"[cyan]Total reminders played:[/cyan] {app.reminder_count}")
