@@ -195,7 +195,7 @@ def start(
         DEFAULT_NOTIFICATIONS_ENABLED,
         "--notifications/--no-notifications",
         "-n/-N",
-        help="Enable Windows toast notifications",
+        help="Enable desktop notifications",
     ),
 ):
     """
@@ -230,7 +230,7 @@ def start(
             console.print("[cyan]Notifications:[/cyan] Enabled ✓")
         else:
             console.print(
-                "[yellow]Notifications:[/yellow] Requested but unavailable (install windows-toasts)"
+                "[yellow]Notifications:[/yellow] Requested but unavailable"
             )
     else:
         console.print("[cyan]Notifications:[/cyan] Disabled")

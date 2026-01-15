@@ -1,6 +1,7 @@
 """Notification handlers for hydration reminders."""
 
 from pathlib import Path
+import shutil
 import subprocess
 from typing import Optional
 import logging
@@ -277,6 +278,220 @@ class WindowsNotifier:
                 logger.warning(f"PowerShell notification warning: {result.stderr}")
 
             return True
+
+        except Exception as e:
+            logger.error(f"Failed to send notification: {e}")
+            return False
+
+    def send_hydration_reminder(self, reminder_count: int) -> bool:
+        """
+        Send a hydration reminder notification.
+
+        Args:
+            reminder_count: Current count of reminders sent
+
+        Returns:
+            True if notification sent successfully, False otherwise
+        """
+        ordinal = self._get_ordinal(reminder_count)
+        title = f"💧 Time to Hydrate! ({ordinal} reminder)"
+        message = "Take a moment to drink some water and stay healthy!"
+
+        return self.send_notification(title, message, duration="short")
+
+    @staticmethod
+    def _get_ordinal(n: int) -> str:
+        """
+        Convert number to ordinal string (1st, 2nd, 3rd, etc.).
+
+        Args:
+            n: Number to convert
+
+        Returns:
+            Ordinal string representation
+        """
+        if 11 <= n % 100 <= 13:
+            suffix = "th"
+        else:
+            suffix = {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+        return f"{n}{suffix}"
+
+
+class LinuxSoundPlayer:
+    """Handle sound playback on native Linux using available audio players."""
+
+    def __init__(self, sounds_dir: Path):
+        """
+        Initialize the Linux sound player.
+
+        Args:
+            sounds_dir: Directory containing sound files
+        """
+        self.sounds_dir = sounds_dir
+
+        if not self.sounds_dir.exists():
+            raise FileNotFoundError(f"Sounds directory not found: {sounds_dir}")
+
+        # Find available audio player
+        self._player_cmd = self._find_player()
+
+    def _find_player(self) -> Optional[list[str]]:
+        """
+        Find an available audio player on the system.
+
+        Returns:
+            Command list for the player, or None if no player found
+        """
+        # Try paplay (PulseAudio) first - most common on modern distros
+        if shutil.which("paplay"):
+            return ["paplay"]
+
+        # Try aplay (ALSA) - widely available
+        if shutil.which("aplay"):
+            return ["aplay", "-q"]
+
+        # Try ffplay (FFmpeg) - good for volume control
+        if shutil.which("ffplay"):
+            return ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet"]
+
+        logger.warning("No audio player found (tried: paplay, aplay, ffplay)")
+        return None
+
+    def play_wav(self, sound_file: str, volume: float = 1.0) -> None:
+        """
+        Play a WAV file using available Linux audio player (non-blocking).
+
+        Args:
+            sound_file: Name of sound file in sounds_dir (e.g., 'simple.wav')
+            volume: Volume level from 0.0 (silent) to 1.0 (max). Default is 1.0
+                   Note: Volume control only works with ffplay
+
+        Raises:
+            FileNotFoundError: If sound file doesn't exist
+            ValueError: If volume is out of range
+            RuntimeError: If no audio player is available
+        """
+        if not 0.0 <= volume <= 1.0:
+            raise ValueError(f"Volume must be between 0.0 and 1.0, got {volume}")
+
+        sound_path = self.sounds_dir / sound_file
+
+        if not sound_path.exists():
+            raise FileNotFoundError(f"Sound file not found: {sound_path}")
+
+        if self._player_cmd is None:
+            raise RuntimeError("No audio player available on this system")
+
+        cmd = self._player_cmd.copy()
+
+        # Add volume control for ffplay
+        if "ffplay" in cmd[0]:
+            cmd.extend(["-volume", str(int(volume * 100))])
+
+        cmd.append(str(sound_path))
+
+        subprocess.Popen(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL
+        )
+
+    def list_sounds(self) -> list[str]:
+        """
+        List available sound files.
+
+        Returns:
+            List of WAV filenames
+        """
+        return sorted([f.name for f in self.sounds_dir.glob("*.wav")])
+
+    def validate_sound(self, sound_file: str) -> bool:
+        """
+        Check if a sound file exists.
+
+        Args:
+            sound_file: Name of sound file
+
+        Returns:
+            True if file exists, False otherwise
+        """
+        return (self.sounds_dir / sound_file).exists()
+
+
+class LinuxNotifier:
+    """Handle desktop notifications on native Linux using notify-send."""
+
+    def __init__(self, app_id: str = "Hydrate"):
+        """
+        Initialize the Linux notifier.
+
+        Args:
+            app_id: Application identifier for notifications
+        """
+        self.app_id = app_id
+        self._is_available = self._check_availability()
+
+    def _check_availability(self) -> bool:
+        """
+        Check if notify-send is available.
+
+        Returns:
+            True if notify-send is accessible, False otherwise
+        """
+        return shutil.which("notify-send") is not None
+
+    @property
+    def is_available(self) -> bool:
+        """
+        Check if notifications are available.
+
+        Returns:
+            True if notifications can be sent, False otherwise
+        """
+        return self._is_available
+
+    def send_notification(
+        self,
+        title: str,
+        message: str,
+        duration: str = "short",
+    ) -> bool:
+        """
+        Send a desktop notification via notify-send.
+
+        Args:
+            title: Notification title
+            message: Notification message body
+            duration: Duration of notification ('short' or 'long')
+
+        Returns:
+            True if notification sent successfully, False otherwise
+        """
+        if not self.is_available:
+            logger.debug("Notifications not available, skipping")
+            return False
+
+        try:
+            # Map duration to milliseconds (short=5s, long=10s)
+            expire_time = "10000" if duration == "long" else "5000"
+
+            cmd = [
+                "notify-send",
+                "--app-name", self.app_id,
+                "--expire-time", expire_time,
+                title,
+                message,
+            ]
+
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+
+            return result.returncode == 0
 
         except Exception as e:
             logger.error(f"Failed to send notification: {e}")
